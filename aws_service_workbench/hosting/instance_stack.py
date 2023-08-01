@@ -1,0 +1,371 @@
+from aws_cdk import (
+    Duration,
+    aws_ec2 as ec2,
+    aws_logs as logs,
+    CfnOutput,
+    RemovalPolicy, NestedStack,
+)
+from aws_cdk.aws_iam import Role, ServicePrincipal, ManagedPolicy
+from constructs import Construct
+
+
+class InstanceStack(NestedStack):
+    def __init__(
+            self,
+            scope: Construct,
+            construct_id: str,
+            vpc: ec2.Vpc,
+            security_group: ec2.SecurityGroup,
+            key_name: str,
+            debug_mode: bool,
+            **kwargs
+    ) -> None:
+        super().__init__(scope, construct_id, **kwargs)
+
+        role = Role(
+            self, "MyInstanceRole", assumed_by=ServicePrincipal("ec2.amazonaws.com")
+        )
+        # role.add_managed_policy(ManagedPolicy.from_aws_managed_policy_name("AdministratorAccess"))
+        role.add_managed_policy(
+            ManagedPolicy.from_aws_managed_policy_name("AWSCloudFormationFullAccess")
+        )
+        role.apply_removal_policy(RemovalPolicy.DESTROY)
+
+        # =====================
+        # STORAGE
+        # =====================
+
+        # =====================
+        # COMPUTING
+        # =====================
+
+        # Ubuntu
+        ubuntu_bootstrapping = ec2.UserData.for_linux()
+
+        # # https://aws.amazon.com/premiumsupport/knowledge-center/install-cloudformation-scripts/
+        # # https://gist.github.com/mmasko/66d34b651642525c63cd39251e0c2a8b#gistcomment-3931793
+        ubuntu_bootstrapping.add_commands(
+            "sudo apt-get -y update",
+            "sudo apt-get -y upgrade",
+            "sudo apt-get -y install python3 python3-pip unzip",
+
+            # Download Cloudformation Helper Scripts
+            "sudo pip3 install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz",
+
+            # "until git clone https://github.com/aws-quickstart/quickstart-linux-utilities.git; do echo \"Retrying\"; done",
+            # "cd /quickstart-linux-utilities",
+            # "source quickstart-cfn-tools.source",
+            # "qs_update-os || qs_err",
+            # "qs_bootstrap_pip || qs_err",
+            # "qs_aws-cfn-bootstrap || qs_err"
+        )
+
+        # Look up the most recent image matching a set of AMI filters.
+        # In this case, look up the Ubuntu instance AMI
+        # in the 'name' field:
+        ubuntu_image = ec2.LookupMachineImage(
+            # Canonical, Ubuntu, 20.04 LTS, amd64 focal image build on 2021-04-30
+            # ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-20210430
+            name="ubuntu/images/*ubuntu-jammy-22.04-*",
+            owners=["099720109477"],
+            filters={"architecture": ["x86_64"]},
+            user_data=ubuntu_bootstrapping,
+        )
+
+        image = ubuntu_image
+
+        # View instance Logs in the Console
+        # https: // docs.aws.amazon.com / systems - manager / latest / userguide / monitoring - cloudwatch - agent.html
+        # https: // docs.aws.amazon.com / AmazonCloudWatch / latest / monitoring / Install - CloudWatch - Agent - New - Instances - CloudFormation.html
+        # https://aws.amazon.com/blogs/devops/view-cloudformation-logs-in-the-console/
+        # https://s3.amazonaws.com/cloudformation-templates-us-east-1/CloudWatch_Logs.template
+        instance_log_group = logs.LogGroup.from_log_group_name(
+            self, "InstanceLogGroup", log_group_name="InstanceLogGroup"
+        )
+
+        working_dir = "/home/ubuntu/"
+        handle = ec2.InitServiceRestartHandle()
+        # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-init.html
+        init_ubuntu = ec2.CloudFormationInit.from_config_sets(
+            config_sets={
+                # Applies the configs below in this order
+                "packaging": ["install_snap"],
+                "logging": ["install_cw_agent"],
+                "testing": [],
+                "programming": ["python3"],
+                "devops": ["docker"],
+                "sysadmin": ["awscli", "aws-sam-cli", "cfn-cli"],
+                "remotecontrol": ["install_mosh", "install_vnc"],
+                "connectivity": ["install_mosh"],
+
+                # https://github.com/awslabs/service-workbench-on-aws/blob/mainline/docs/service-workbench-on-aws-implementation-guide.pdf
+                "service-workbench": ["nodejs", "golang", "install-service-workbench"],
+            },
+            configs={
+                "nodejs": ec2.InitConfig(
+                    [
+                        ec2.InitCommand.shell_command(
+                            "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.35.3/install.sh | bash",
+                            cwd=working_dir,
+                        ),
+                        ec2.InitCommand.shell_command(
+                            "source ~/.bashrc",
+                            cwd=working_dir,
+                        ),
+                        ec2.InitCommand.shell_command(
+                            "nvm install 14",
+                            cwd=working_dir,
+                        ),
+                        ec2.InitCommand.shell_command(
+                            "npm install -g serverless pnpm hygen",
+                            cwd=working_dir,
+                        ),
+                    ]
+                ),
+                "golang": ec2.InitConfig(
+                    [
+                        ec2.InitCommand.shell_command(
+                            "wget -c https://golang.org/dl/go1.15.2.linux-amd64.tar.gz",
+                            cwd=working_dir,
+                        ),
+                        ec2.InitCommand.shell_command(
+                            "wget -c https://golang.org/dl/go1.15.2.linux-amd64.tar.gz",
+                            cwd=working_dir,
+                        ),
+                        ec2.InitCommand.shell_command(
+                            "echo \"PATH=$PATH:/usr/local/go/bin\" >> ~/.bashrc",
+                            cwd=working_dir,
+                        ),
+                        ec2.InitCommand.shell_command(
+                            "source ~/.bashrc",
+                            cwd=working_dir,
+                        ),
+                    ]
+                ),
+                "install-service-workbench": ec2.InitConfig(
+                    [
+                        ec2.InitPackage.apt(
+                            package_name="git",
+                        ),
+                        ec2.InitCommand.shell_command(
+                            "git clone https://github.com/awslabs/service-workbench-on-aws.git",
+                            cwd=working_dir,
+                        ),
+                    ]
+                ),                
+                "docker": ec2.InitConfig(
+                    [
+                        # Install Docker using the repository
+                        # https://docs.docker.com/engine/install/ubuntu/#install-using-the-repository
+                        ec2.InitCommand.shell_command(
+                            "apt update && apt install -y ca-certificates curl gnupg lsb-release && "
+                            + "mkdir -p /etc/apt/keyrings && "
+                            + "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | "
+                              "sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg && "
+                            + 'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] '
+                              'https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee '
+                              "/etc/apt/sources.list.d/docker.list > /dev/null && "
+                            + " apt update && "
+                            + "apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin",
+                            cwd=working_dir,
+                        ),
+                    ]
+                ),
+                "python3": ec2.InitConfig(
+                    [
+                        # add-apt-repository ppa:deadsnakes/ppa
+                        ec2.InitPackage.apt(
+                            package_name="software-properties-common",
+                        ),
+                        ec2.InitCommand.shell_command(
+                            "add-apt-repository ppa:deadsnakes/ppa",
+                            cwd=working_dir,
+                        ),
+                        ec2.InitCommand.shell_command(
+                            "apt update",
+                            cwd=working_dir,
+                        ),
+                        ec2.InitPackage.apt(
+                            package_name="python3.10",
+                        ),
+                    ]
+                ),
+                "awscli": ec2.InitConfig(
+                    [
+                        # https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html
+                        ec2.InitFile.from_url(
+                            file_name=working_dir + "awscliv2.zip",
+                            url="https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip",
+                        ),
+                        ec2.InitPackage.apt(
+                            package_name="unzip",
+                        ),
+                        ec2.InitCommand.shell_command(
+                            "unzip awscliv2.zip",
+                            cwd=working_dir,
+                        ),
+                        ec2.InitCommand.shell_command(
+                            "sudo ./aws/install",
+                            cwd=working_dir,
+                        ),
+                    ]
+                ),
+                "aws-sam-cli": ec2.InitConfig(
+                    [
+                        # Download installer package
+                        # https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-cli-install-linux.html#serverless-sam-cli-install-linux-sam-cli
+                        ec2.InitFile.from_url(
+                            file_name=working_dir + "aws-sam-cli-linux-x86_64.zip",
+                            # Latest
+                            # url="https://github.com/aws/aws-sam-cli/releases/latest/download/aws-sam-cli-linux-x86_64.zip",
+                            # v1.84
+                            url="https://github.com/aws/aws-sam-cli/releases/download/v1.84.0/aws-sam-cli-linux-x86_64.zip",
+                        ),
+                        # Install unzip
+                        ec2.InitPackage.apt(
+                            package_name="unzip",
+                        ),
+                        #  Extract
+                        ec2.InitCommand.shell_command(
+                            "unzip aws-sam-cli-linux-x86_64.zip -d sam-installation/",
+                            cwd=working_dir,
+                        ),
+                        #  Install
+                        ec2.InitCommand.shell_command(
+                            "sudo ./sam-installation/install",
+                            cwd=working_dir,
+                        ),
+                        #  Check version
+                        ec2.InitCommand.shell_command(
+                            "sam --version",
+                            cwd=working_dir,
+                        ),
+                    ]
+                ),
+                "cfn-cli": ec2.InitConfig(
+                    [
+                        # Pin dependencies' versions to workaround conflicts
+                        #
+                        # https://stackoverflow.com/a/73199422
+                        # https://github.com/aws-cloudformation/cloudformation-cli/issues/864
+                        # https://github.com/aws-cloudformation/cloudformation-cli/issues/899
+                        ec2.InitCommand.shell_command(
+                            "pip install --upgrade requests urllib3",
+                            cwd=working_dir,
+                        ),
+                        ec2.InitCommand.shell_command(
+                            "pip install markupsafe==2.0.1 pyyaml==5.4.1",
+                            cwd=working_dir,
+                        ),
+                        ec2.InitCommand.shell_command(
+                            "pip install werkzeug==2.1.2 --no-deps",
+                            cwd=working_dir,
+                        ),
+                        #  Install
+                        # https://docs.aws.amazon.com/cloudformation-cli/latest/userguide/what-is-cloudformation-cli.html#resource-type-setup
+                        ec2.InitCommand.shell_command(
+                            "pip install cloudformation-cli cloudformation-cli-java-plugin cloudformation-cli-go-plugin "
+                            "cloudformation-cli-python-plugin cloudformation-cli-typescript-plugin",
+                            cwd=working_dir,
+                        ),
+                    ]
+                ),
+                "install_snap": ec2.InitConfig(
+                    [
+                        ec2.InitPackage.apt(
+                            package_name="snap",
+                        ),
+                    ]
+                ),
+                "install_mosh": ec2.InitConfig(
+                    [
+                        ec2.InitPackage.apt(
+                            package_name="mosh",
+                        ),
+                        ec2.InitCommand.shell_command(
+                            shell_command="sudo ufw allow 60000:61000/udp",
+                            cwd=working_dir,
+                        ),
+                    ]
+                ),
+                "install_cw_agent": ec2.InitConfig(
+                    [
+                        # Manually create or edit the CloudWatch agent configuration file
+                        # https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Agent-Configuration-File-Details.html
+                        # Installing and running the CloudWatch agent on your servers
+                        # https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/install-CloudWatch-Agent-commandline-fleet.html
+                        ec2.InitFile.from_url(
+                            file_name=working_dir + "/amazon-cloudwatch-agent.deb",
+                            url="https://s3.amazonaws.com/amazoncloudwatch-agent/debian/amd64/latest/amazon-cloudwatch"
+                                "-agent.deb",
+                        ),
+                        ec2.InitCommand.shell_command(
+                            shell_command="dpkg -i -E ./amazon-cloudwatch-agent.deb",
+                            cwd=working_dir,
+                        )
+                        # TODO Design config file and start CloudWatch agent service
+                        # Installing the CloudWatch agent on new instances using AWS CloudFormation
+                        # https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Install-CloudWatch-Agent-New-Instances-CloudFormation.html
+                    ]
+                ),
+            },
+        )
+
+        init = init_ubuntu
+        instance = ec2.Instance(
+            self,
+            "Instance",
+            user_data_causes_replacement=True,
+            vpc=vpc,
+            instance_type=ec2.InstanceType.of(
+                ec2.InstanceClass.BURSTABLE3, ec2.InstanceSize.LARGE
+            ),
+            machine_image=image,
+            key_name=key_name,
+            security_group=security_group,
+            role=role,
+            init=init,
+            # https://docs.aws.amazon.com/cdk/api/latest/python/aws_cdk.aws_ec2/ApplyCloudFormationInitOptions.html
+            init_options=ec2.ApplyCloudFormationInitOptions(
+                # Optional, which configsets to activate (['default'] by default)
+                config_sets=[
+                    "service-workbench",
+                ],
+                # Don’t fail the instance creation when cfn-init fails. You can use this to
+                # prevent CloudFormation from rolling back when instances fail to start up,
+                # to help in debugging. Default: false
+                ignore_failures=debug_mode,
+                # Optional, how long the installation is expected to take (5 minutes by default)
+                timeout=Duration.minutes(5),
+                # Optional, whether to include the --url argument when running cfn-init and cfn-signal commands (false by default)
+                include_url=False,
+                # Optional, whether to include the --role argument when running cfn-init and cfn-signal commands (false by default)
+                include_role=False,
+            ),
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
+        )
+
+        CfnOutput(
+            self,
+            "InstancePublicDNSname",
+            value=instance.instance_public_dns_name,
+            description="Publicly-routable DNS name for this instance.",
+        )
+
+        user = "ubuntu"
+        ssh_command = (
+                "ssh"
+                + " -v"
+                + " -i "
+                + key_name
+                + ".pem "
+                + user
+                + "@"
+                + instance.instance_public_dns_name
+        )
+        CfnOutput(
+            self,
+            "InstanceSSHcommand",
+            value=ssh_command,
+            description="Command to SSH into instance.",
+        )

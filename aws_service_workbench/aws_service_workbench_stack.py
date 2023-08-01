@@ -1,19 +1,52 @@
 from aws_cdk import (
     # Duration,
     Stack,
-    # aws_sqs as sqs,
+    CfnOutput, aws_ec2 as ec2,
 )
 from constructs import Construct
 
-class AwsServiceWorkbenchStack(Stack):
+from aws_service_workbench.hosting.instance_stack import InstanceStack
+from aws_service_workbench.networking.networking_stack import NetworkingStack
+from aws_service_workbench.security.security_stack import SecurityStack
 
+
+class AwsServiceWorkbenchStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        # The code that defines your stack goes here
+        # =====================
+        # NETWORKING
+        # =====================
+        net = NetworkingStack(
+            self,
+            "NetworkingStack",
+        )
 
-        # example resource
-        # queue = sqs.Queue(
-        #     self, "AwsServiceWorkbenchQueue",
-        #     visibility_timeout=Duration.seconds(300),
-        # )
+        CfnOutput(
+            self,
+            "VpcId",
+            description="Identifier for this VPC.",
+            value=net.vpc.vpc_id,
+        )
+
+        # =====================
+        # SECURITY
+        # =====================
+        sec = SecurityStack(
+            self,
+            "SecurityStack",
+            vpc=net.vpc,
+            whitelisted_peer=ec2.Peer.prefix_list(self.node.try_get_context("peers"))
+        )
+
+        # =====================
+        # COMPUTE
+        # =====================
+        instance = InstanceStack(
+            self,
+            "InstanceStack",
+            vpc=net.vpc,
+            security_group=sec.outer_perimeter_security_group,
+            key_name=self.node.try_get_context("key_name"),
+            debug_mode=True,
+        )
